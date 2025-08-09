@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 type SMTP struct {
 	Login, Password, Server, Port string
@@ -58,4 +61,18 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func (c Config) Validate() error {
+	// HTTP-only: cv_url/email come in request body; validate env/SMTP basics.
+	if c.SMTP.Login == "" || c.SMTP.Password == "" {
+		return fmt.Errorf("SMTP_LOGIN and SMTP_PASSWORD are required")
+	}
+	if c.SMTP.Server == "" || c.SMTP.Port == "" {
+		return fmt.Errorf("smtp server/port are required")
+	}
+	if c.TargetEmail == "" {
+		return fmt.Errorf("target email is required")
+	}
+	return nil
 }

@@ -2,42 +2,67 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+	"wtotem-test/internal/config"
+	"wtotem-test/internal/httpapi"
+	"wtotem-test/internal/mailer"
+	"wtotem-test/internal/report"
+	"wtotem-test/internal/zipper"
 )
 
 func main() {
-	addr := getenv("ADDR", ":8080")
+	// HTTP-only app: request carries cv_url/email; SMTP/env come from environment.
+	cfg := config.FromFlagsOrEnv(
+		"", "", // cvURL, email — HTTP body
+		os.Getenv("SMTP_LOGIN"),
+		os.Getenv("SMTP_PASSWORD"),
+		os.Getenv("SMTP_SERVER"),
+		os.Getenv("SMTP_PORT"),
+		os.Getenv("ADDR"),
+		os.Getenv("PROJECT_DIR"),
+		os.Getenv("TARGET_EMAIL"),
+	)
 
-	// Router
-	mux := http.NewServeMux()
-	api := &api{}
-
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("POST /submit", api.handleSubmit) // TODO: implement in next steps
-
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
+	// Reasonable defaults
+	if cfg.TargetEmail == "" {
+		cfg.TargetEmail = "szhaisan@wtotem.com"
+	}
+	if cfg.HTTPAddr == "" {
+		cfg.HTTPAddr = ":8080"
+	}
+	if cfg.SourceDir == "" {
+		cfg.SourceDir = "."
+	}
+	if cfg.SMTP.Server == "" {
+		cfg.SMTP.Server = "smtp.gmail.com"
+	}
+	if cfg.SMTP.Port == "" {
+		cfg.SMTP.Port = "587"
 	}
 
-	// Start
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("config: %v", err)
+	}
+
+	// Dependencies
+	sender := mailer.New(mailer.SMTP{
+		Login:    cfg.SMTP.Login,
+		Password: cfg.SMTP.Password,
+		Server:   cfg.SMTP.Server,
+		Port:     cfg.SMTP.Port,
+	})
+	rb := report.NewBuilder()
+	z := zipper.New()
+
+	// Server
+	srv := httpapi.NewServer(cfg, rb, z, sender)
+
 	errCh := make(chan error, 1)
-	go func() {
-		log.Printf("http: listening on %s", addr)
-		errCh <- srv.ListenAndServe()
-	}()
+	go func() { errCh <- srv.Start() }()
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -48,32 +73,9 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("http: shutdown error: %v", err)
+			log.Printf("shutdown: %v", err)
 		}
-		log.Printf("http: stopped")
 	case err := <-errCh:
-		log.Fatalf("http: server error: %v", err)
+		log.Fatalf("server error: %v", err)
 	}
-}
-
-type api struct{}
-
-// Step 1: placeholder. Next step we’ll parse JSON {cv_url,email}, build report, zip, and send.
-func (a *api) handleSubmit(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented yet")
-}
-
-// ---- small helpers ----
-
-func writeError(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg})
-}
-
-func getenv(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }
